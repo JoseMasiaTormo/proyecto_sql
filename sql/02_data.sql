@@ -3107,7 +3107,7 @@ SELECT setval('fact_sales_sale_id_seq', 1000);
 -- ===================================================================>
 
 -- --------------------------------------------------------------------
--- 1. Valores Nulos
+-- 1. Valores Nulos en Precio
 -- Algunos registros tienen precio_usd NULL porque el CSV tenía
 -- rangos de precio ("$12,000-$15,000") o valores no parseables.
 -- Los reemplazamos con la mediana del precio de su marca.
