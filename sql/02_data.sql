@@ -3192,7 +3192,27 @@ WHERE aceleracion_0_100 IS NOT NULL
 AND (aceleracion_0_100  <= 0 OR aceleracion_0_100 > 30);
 
 -- --------------------------------------------------------------------
--- 5. Normalización de marcas (case inconsistente en el csv)
+-- 5. Aceleraciones nulas
+-- Aquí eliminamos los campos que tienen aceleraciones nulas.
+-- --------------------------------------------------------------------
+
+-- Ver cuantos coches tienen aceleración nula
+SELECT COUNT(*) AS coches_sin_acc
+FROM dim_coche WHERE aceleracion_0_100 IS NULL;
+
+-- Actualizamos aceleracion_0_100 nulo con la media de aceleración de su tipo de combustible.
+UPDATE dim_coche dc
+SET aceleracion_0_100 = subq.aceleracion_media
+FROM (
+	SELECT combustible_id, ROUND(AVG(aceleracion_0_100)::NUMERIC, 1) AS aceleracion_media
+	FROM dim_coche
+	WHERE aceleracion_0_100 IS NOT NULL
+	GROUP BY combustible_id
+) subq
+WHERE dc.combustible_id = subq.combustible_id AND dc.aceleracion_0_100 IS NULL;
+
+-- --------------------------------------------------------------------
+-- 6. Normalización de marcas (case inconsistente en el csv)
 -- En el CSV original convivían "NISSAN", "Nissan", "KIA", "Kia", "KIA "
 -- Ya los normalizamos en la carga (todo a UPPERCASE en dim_marca),
 -- pero verificamos que no quedó ninguno sin normalizar.
@@ -3204,7 +3224,7 @@ UPDATE dim_marca SET nombre = UPPER(TRIM(nombre))
 WHERE nombre != UPPER(TRIM(nombre));
 
 -- --------------------------------------------------------------------
--- 6. Ventas con total_price inconsistente
+-- 7. Ventas con total_price inconsistente
 -- total_price debería ser igual a unit_price * quantity.
 -- Detectamos discrepancias (margen de +-1$ por redondeos).
 -- --------------------------------------------------------------------
@@ -3220,7 +3240,7 @@ SET total_price = ROUND(unit_price * quantity, 2)
 WHERE ABS(total_price - ROUND(unit_price * quantity, 2)) > 1;
 
 -- --------------------------------------------------------------------
--- 7. Ejemplo de delete
+-- 8. Ejemplo de delete
 -- Eliminamos ventas con qunatity = 0 o negativos si las hubiera
 -- (no debería haber por el CHECK de antes, pero lo validamos).
 -- --------------------------------------------------------------------
