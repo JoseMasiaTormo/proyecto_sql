@@ -186,3 +186,255 @@ LIMIT 10;
 -- Incluye LEFT JOIN para ver países aunque no tengan ventas.
 -- -------------------------------------------------------------
 
+WITH paises_referencia AS (
+	-- Lista de todos los países que aparecen en el dataset
+	SELECT DISTINCT country FROM fact_sales
+)
+SELECT
+	pr.country,
+	COUNT(fsa.sale_id) AS num_ventas,
+	COALESCE(SUM(fsa.total_price), 0) AS ingresos_totales,
+	COALESCE(ROUND(AVG(fsa.total_price), 2), 0) AS ticket_medio
+FROM paises_referencia pr
+LEFT JOIN fact_sales fsa ON pr.country = fsa.country 
+GROUP BY pr.country 
+ORDER BY ingresos_totales DESC;
+
+-- -------------------------------------------------------------
+-- C3. Ranking de marcas por ingresos con funciones ventana
+-- Insight: posición relativa de cada marca en el mercado.
+-- RANK() permite ver empates; DENSE_RANK() no deja huecos.
+-- -------------------------------------------------------------
+
+SELECT
+	marca,
+	ingresos_totales,
+	num_ventas,
+	RANK() OVER (ORDER BY ingresos_totales DESC) AS ranking_ingresos,
+	DENSE_RANK() OVER (ORDER BY num_ventas DESC) AS ranking_ventas
+FROM v_ventas_por_marca
+LIMIT 15;
+
+-- -------------------------------------------------------------
+-- C4. Cuota de mercado por tipo de combustible en ventas
+-- Insight: qué tecnología de propulsión domina las ventas reales (no solo el catálogo). 
+-- Combina fact_sales con dim_coche y dim_combustible.
+-- -------------------------------------------------------------
+
+SELECT
+	cb.tipo AS combustible,
+	COUNT(fsa.sale_id) AS num_ventas,
+	ROUND(SUM(fsa.total_price), 2) AS ingresos,
+	ROUND(SUM(fsa.total_price) * 100.0 / SUM(SUM(fsa.total_price)) OVER (), 2) AS pct_ingresos
+FROM fact_sales fsa
+INNER JOIN dim_coche dc ON fsa.coche_id = dc.coche_id
+INNER JOIN dim_combustible cb ON dc.combustible_id = cb.combustible_id
+GROUP BY cb.tipo
+ORDER BY ingresos DESC;
+
+-- -------------------------------------------------------------
+-- C5. Clasificación de coches por segmento de precio con CASE
+-- Insight: distribución del catálogo por segmento (económico
+-- medio, premium, lujo) y rendimiento medio de cada segmento.
+-- -------------------------------------------------------------
+
+SELECT 
+CASE
+	WHEN precio_usd < 20000 THEN 'Económico (<20k)'
+	WHEN precio_usd BETWEEN 20000 AND 60000 THEN 'Medio (20k-60k)'
+	WHEN precio_usd BETWEEN 60001 AND 150000 THEN 'Premium (60k-150k)'
+	WHEN precio_usd > 150000 THEN 'Lujo (>150k)'
+	ELSE 'Sin precio'
+END AS segmento,
+COUNT(*) AS num_modelos,
+ROUND(AVG(velocidad_max_kmh), 1) AS velocidad_media,
+ROUND(AVG(aceleracion_0_100), 2) AS aceleracion_media 
+FROM dim_coche
+WHERE precio_usd > 0
+GROUP BY segmento
+ORDER BY MIN(precio_usd);
+
+-- -------------------------------------------------------------
+-- C6. Ventas por trimestre usando funciones de fecha
+-- Insight: detectar estacionalidad en las ventas.
+-- (¿Hay trimestre con más actividad comercial?).
+-- CAST convierte el número de trimestre a texto para el label.
+-- -------------------------------------------------------------
+
+SELECT
+	EXTRACT(YEAR FROM sale_date)::INT AS anio,
+	EXTRACT(QUARTER FROM sale_date)::INT AS trimestre,
+	'Q' || CAST(EXTRACT(QUARTER FROM sale_date) AS TEXT) AS label_trimestre,
+	COUNT(sale_id) AS num_ventas,
+	ROUND(SUM(total_price), 2) AS ingresos
+FROM fact_sales
+GROUP BY EXTRACT(YEAR FROM sale_date), EXTRACT(QUARTER FROM sale_date)
+ORDER BY anio, trimestre;
+
+-- -------------------------------------------------------------
+-- C7. Ticket medio por dealer y ranking dentro de su país
+-- Insight: qué dealers venden coches más caros en cada mercado.
+-- Usa función ventana para ranking por grupos (país).
+-- -------------------------------------------------------------
+
+SELECT
+	fsa.country,
+	fsa.dealer_id,
+	COUNT(fsa.sale_id) AS num_ventas,
+	ROUND(AVG(fsa.total_price), 2) AS ticket_medio,
+	RANK() OVER (
+		PARTITION BY fsa.country
+		ORDER BY AVG(fsa.total_price) DESC
+	) AS ranking_en_pais
+FROM fact_sales fsa
+GROUP BY fsa.country, fsa.dealer_id
+ORDER BY fsa.country, ranking_en_pais;
+
+-- -------------------------------------------------------------
+-- C8. CTE encadenada: ventas del top 5 marcas más vendidas
+-- Insight: análisis en profundidad de los líderes de mercado.
+-- Usamos dos CTEs encadenadas: primera obetenemos el top 5,
+-- luego cruzamos con las ventas detalladas de esas marcas.
+-- -------------------------------------------------------------
+
+WITH top5_marcas AS (
+	-- CTE1: Identificar las 5 marcas con más unidades vendidas
+	SELECT
+		m.marca_id,
+		m.nombre,
+		SUM(fsa.quantity) AS total_unidades
+	FROM fact_sales fsa
+	JOIN dim_coche dc ON fsa.coche_id = dc.coche_id
+	JOIN dim_marca m ON dc.marca_id = m.marca_id
+	GROUP BY m.marca_id, m.nombre
+	ORDER BY total_unidades DESC
+	LIMIT 5
+),
+ventas_top5 AS (
+	-- CTE 2: ventas anuales de esas 5 marcas
+	SELECT
+		t.nombre AS marca,
+		EXTRACT(YEAR FROM fsa.sale_date)::INT AS anio,
+		COUNT(fsa.sale_id) AS num_ventas,
+		ROUND(SUM(fsa.total_price), 2) AS ingresos
+	FROM fact_sales fsa
+	JOIN dim_coche dc ON fsa.coche_id = dc.coche_id
+	JOIN top5_marcas t ON dc.marca_id = t.marca_id 
+	GROUP BY t.nombre, EXTRACT(YEAR FROM fsa.sale_date)
+)
+SELECT * FROM ventas_top5
+ORDER BY marca, anio;
+
+-- -------------------------------------------------------------
+-- C9. Ventas acumuladas por marca con ventana acumulativa
+-- Insight: progresión de ingresos a lo largo del tiempo para
+-- ver que marcas crecen más rápido (running total).
+-- -------------------------------------------------------------
+
+WITH ventas_mesuales AS (
+	SELECT
+	m.nombre AS marca,
+	DATE_TRUNC('month', fsa.sale_date)::DATE AS mes,
+	ROUND(SUM(fsa.total_price), 2) AS ingresos_mes
+	FROM fact_sales fsa
+	JOIN dim_coche dc ON fsa.coche_id = dc.coche_id
+	JOIN dim_marca m ON dc.marca_id = m.marca_id
+	-- Solo las 3 marcas con más ventas para no saturar el resultado
+	WHERE m.nombre IN (
+		SELECT m2.nombre
+		FROM fact_sales fsa2
+		JOIN dim_coche dc2 ON fsa2.coche_id = dc2.coche_id
+		JOIN dim_marca m2 ON dc2.marca_id = m2.marca_id
+		GROUP BY m2.nombre
+		ORDER BY SUM(fsa2.quantity) DESC 
+		LIMIT 3
+	)
+	GROUP BY m.nombre, DATE_TRUNC('month', fsa.sale_date)
+)
+SELECT
+	marca,
+	mes,
+	ingresos_mes,
+	ROUND(SUM(ingresos_mes) OVER (
+		PARTITION BY marca
+		ORDER BY mes
+		ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+	), 2) AS ingresos_acumulados
+FROM ventas_mesuales 
+ORDER BY marca, mes;
+
+-- -------------------------------------------------------------
+-- C10. Subquery: coches del catálogo que NUNCA se han vendido
+-- Insight: modelos del catálogo sin ninguna venta registrada.
+-- Útil para decisiones de inventario o descatalogación.
+-- LEFT JOIN + IS NULL como alternativa a NOT IN con subquery.
+-- -------------------------------------------------------------
+
+SELECT
+	m.nombre AS marca,
+	dc.modelo,
+	dc.precio_usd,
+	cb.tipo AS combustible
+FROM dim_coche dc
+JOIN dim_marca m ON dc.marca_id = m.marca_id 
+LEFT JOIN dim_combustible cb ON dc.combustible_id = cb.combustible_id
+WHERE dc.coche_id NOT IN (
+	SELECT DISTINCT coche_id FROM fact_sales
+)
+ORDER BY m.nombre, dc.modelo
+LIMIT 30;
+
+-- -------------------------------------------------------------
+-- C11. Transacción: insertar una venta nueva y hacer rollback
+-- Demostración de BEGIN / COMMIT / ROLLBACK.
+-- Insertaremos una venta de prueba y la revertimos para no
+-- contaminar los datos reales.
+-- -------------------------------------------------------------
+
+BEGIN;
+
+	INSERT INTO fact_sales (
+		sale_date, customer_id, dealer_id, salesperson_id,
+		coche_id, quantity, unit_price, total_price, payment_method, country
+	) VALUES (
+		'2025-01-15', 'CL0001', 'DL001', 'SP001',
+		1, 1, 1100000.00, 1100000.00, 'Cash', 'Spain'
+	);
+	
+	-- Verificamos que se insertó
+	SELECT sale_id, sale_date, total_price FROM fact_sales ORDER BY sale_id DESC LIMIT 1;
+	
+ROLLBACK;
+-- La venta de prueba queda descartada, los datos siguen intactos.
+
+-- -------------------------------------------------------------
+-- C12. Uso de la función creada en 01_schema.sql
+-- Insight: comparar ingresos totales entre dos marcas concretas.
+-- -------------------------------------------------------------
+
+SELECT 
+	'FERRARI' AS marca,
+	fn_total_ventas_marca('FERRARI') AS ingresos_totales
+UNION ALL
+SELECT 
+	'BMW',
+	fn_total_ventas_marca('BMW');
+
+-- -------------------------------------------------------------
+-- C13. Ventas por vendedor con % sobre el total de su dealer
+-- Insight: qué vendedor aporta más dentro de cada concesionario.
+-- Usa función ventana para calcular el total del dealer en paralelo.
+-- -------------------------------------------------------------
+
+SELECT
+	dealer_id,
+	salesperson_id,
+	COUNT(sale_id) AS num_ventas,
+	ROUND(SUM(total_price), 2) AS ingresos,
+	ROUND(
+		SUM(total_price) * 100.0 /
+		SUM(SUM(total_price)) OVER (PARTITION BY dealer_id), 2
+	) AS pct_sobre_dealer
+FROM fact_sales
+GROUP BY dealer_id, salesperson_id
+ORDER BY dealer_id, ingresos DESC;
